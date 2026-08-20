@@ -60,8 +60,8 @@ CHANNEL_USERNAME = "@racksun19"
 CHANNEL_LINK = "https://t.me/racksun19"
 GROUP_USERNAME = "@racksungroup"
 GROUP_LINK = "https://t.me/racksungroup"
-CHANNEL2_USERNAME = "@YeuIins"
-CHANNEL2_LINK = "https://t.me/YeuIins"
+CHANNEL2_USERNAME = "@weaying"
+CHANNEL2_LINK = "https://t.me/WEAYing"
 
 IP_API_URL = "https://ip-dwy8.onrender.com/api/rackipapi?ip={ip}"
 
@@ -487,7 +487,7 @@ async def send_join_message(update, context):
         "⚠️ *Hello " + first_name + "!*\n\n"
         "Join our channels and group to use this bot.\n\n"
         "1️⃣ Join Channel 1: @racksun19\n"
-        "2️⃣ Join Channel 2: @YeuIins\n"
+        "2️⃣ Join Channel 2: @WEAYing\n"
         "3️⃣ Join Group: @racksungroup\n\n"
         "After joining all, click *I have Joined* button."
     )
