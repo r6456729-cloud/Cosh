@@ -7,6 +7,7 @@ import sqlite3
 import pathlib
 import requests
 from datetime import datetime
+from urllib.parse import quote
 from flask import Flask
 from threading import Thread
 from telegram import (
@@ -39,6 +40,7 @@ IA_KEY = "Rack"
 IA_NUM_URL = IA_BASE + "/num?key=" + IA_KEY + "&q={number}"
 IA_ADHAR_URL = IA_BASE + "/adhar?key=" + IA_KEY + "&q={aadhar}"
 ROOTX_TG_NUM_URL = "https://rootx-osint.in/?type=tg_num&key=abror&query={term}"
+TG_NUM_FALLBACK_URL = "https://api.igfollows.site/TG/index.php?type=user&key=OGGYxKRISH&term={term}"
 IA_IFSC_URL = IA_BASE + "/ifsc?key=" + IA_KEY + "&q={code}"
 IA_INSTA_URL = IA_BASE + "/insta?key=" + IA_KEY + "&q={username}"
 IA_PAK_URL = IA_BASE + "/pak?key=" + IA_KEY + "&q={number}"
@@ -1308,6 +1310,12 @@ async def lookup(update, context):
     # Retry once if failed
     if data is None:
         data = await _try_fetch(ROOTX_TG_NUM_URL.format(term=term))
+
+    # Fallback Telegram-to-number API when the primary source returns no data.
+    if data is None:
+        data = await _try_fetch(
+            TG_NUM_FALLBACK_URL.format(term=quote(term, safe="@"))
+        )
 
     await delete_msg(context, chat_id, searching.message_id)
 
