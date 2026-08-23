@@ -62,6 +62,8 @@ CHANNEL_USERNAME = "@racksun19"
 CHANNEL_LINK = "https://t.me/racksun19"
 GROUP_USERNAME = "@racksungroup"
 GROUP_LINK = "https://t.me/racksungroup"
+GROUP2_USERNAME = "@rackcraft"
+GROUP2_LINK = "https://t.me/rackcraft"
 CHANNEL2_USERNAME = "@weaying"
 CHANNEL2_LINK = "https://t.me/WEAYing"
 
@@ -473,6 +475,12 @@ async def is_member(user_id, context):
             return False
     except Exception:
         pass
+    try:
+        gr2 = await context.bot.get_chat_member(chat_id=GROUP2_USERNAME, user_id=user_id)
+        if gr2.status not in allowed:
+            return False
+    except Exception:
+        return False
     return True
 
 
@@ -483,6 +491,7 @@ async def send_join_message(update, context):
         [InlineKeyboardButton("📢 Join Channel 1", url=CHANNEL_LINK)],
         [InlineKeyboardButton("📢 Join Channel 2", url=CHANNEL2_LINK)],
         [InlineKeyboardButton("👥 Join Group", url=GROUP_LINK)],
+        [InlineKeyboardButton("👥 Join Rackcraft", url=GROUP2_LINK)],
         [InlineKeyboardButton("✅ I have Joined", callback_data="check_joined")],
     ])
     text = (
@@ -491,6 +500,7 @@ async def send_join_message(update, context):
         "1️⃣ Join Channel 1: @racksun19\n"
         "2️⃣ Join Channel 2: @WEAYing\n"
         "3️⃣ Join Group: @racksungroup\n\n"
+        "4️⃣ Join Rackcraft Group: @rackcraft\n\n"
         "After joining all, click *I have Joined* button."
     )
     sent = await update.message.reply_text(text, reply_markup=join_button, parse_mode="Markdown")
@@ -2383,30 +2393,18 @@ async def anti_spam(update, context):
     except Exception:
         pass
 
-    reason = None
+    # Allow bot commands, shared User/Group/Channel ID actions, and direct
+    # lookup inputs. Everything else in the group is removed.
+    if msg.users_shared or msg.chat_shared:
+        return
 
-    # Check 1: forwarded message
-    if msg.forward_origin or msg.forward_from or msg.forward_from_chat or msg.forward_sender_name:
-        reason = "forwarded"
-
-    # Check 2: links or promotion keywords in text or caption
-    if not reason:
-        text_to_check = msg.text or msg.caption or ""
-        if text_to_check and PROMO_PATTERNS.search(text_to_check):
-            reason = "promotion"
-
-    # Check 3: message contains inline buttons with URLs (common in promo posts)
-    if not reason and msg.reply_markup:
-        try:
-            for row in msg.reply_markup.inline_keyboard:
-                for btn in row:
-                    if btn.url:
-                        reason = "promo_button"
-                        break
-        except Exception:
-            pass
-
-    if not reason:
+    text = (msg.text or "").strip()
+    is_command = bool(text.startswith("/"))
+    is_lookup_input = (
+        (text.startswith("@") and len(text) > 1)
+        or (text.lstrip("+").isdigit() and len(text.lstrip("+")) >= 7)
+    )
+    if is_command or text in ("User", "Group", "Channel") or is_lookup_input:
         return
 
     try:
@@ -2791,9 +2789,10 @@ if __name__ == "__main__":
     app.add_handler(MessageHandler(filters.StatusUpdate.USERS_SHARED, handle_users_shared))
     app.add_handler(MessageHandler(filters.StatusUpdate.CHAT_SHARED, handle_chat_shared))
     app.add_handler(MessageHandler(
-        (filters.TEXT | filters.CAPTION | filters.FORWARDED | filters.Document.ALL | filters.PHOTO | filters.VIDEO | filters.Sticker.ALL) & filters.ChatType.GROUPS,
+        filters.ALL & filters.ChatType.GROUPS,
         anti_spam,
-    ), group=0)
+        block=False,
+    ), group=-1)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, lookup))
     print("Bot is Online!")
     app.run_polling()
