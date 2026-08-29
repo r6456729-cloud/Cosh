@@ -38,6 +38,7 @@ ADMIN_ID = 8300271033
 IA_BASE = "https://osint.invalidayushh.workers.dev"
 IA_KEY = "Rack"
 IA_NUM_URL = IA_BASE + "/num?key=" + IA_KEY + "&q={number}"
+IA_NUMV2_URL = IA_BASE + "/numv2?key=" + IA_KEY + "&q={number}"
 IA_ADHAR_URL = IA_BASE + "/adhar?key=" + IA_KEY + "&q={aadhar}"
 ROOTX_TG_NUM_URL = "https://rootx-osint.in/?type=tg_num&key=abror&query={term}"
 TG_NUM_FALLBACK_URL = "https://api.igfollows.site/TG/index.php?type=user&key=OGGYxKRISH&term={term}"
@@ -51,6 +52,7 @@ IA_LEAK_URL = IA_BASE + "/leak?key=" + IA_KEY + "&q={query}"
 VEHINFO_URL = "https://vehicleinfo-byrack.vercel.app/api?search={reg}"
 
 IA_ID_URL    = IA_BASE + "/id?key="    + IA_KEY + "&q={query}"
+IA_TG_URL    = IA_BASE + "/tg?key="    + IA_KEY + "&q={query}"
 IA_VNUM_URL  = IA_BASE + "/vnum?key="  + IA_KEY + "&q={vnum}"
 IA_FFLIKE_URL  = IA_BASE + "/fflike?key="  + IA_KEY + "&region={region}&uid={uid}"
 IA_FFVISIT_URL = IA_BASE + "/ffvisit?key=" + IA_KEY + "&region={region}&uid={uid}"
@@ -1005,6 +1007,20 @@ async def num_lookup(update, context):
         for r in rows:
             if not isinstance(r, dict):
                 continue
+            normalized = {
+                str(k).strip().lower().replace("-", "_").replace(" ", "_"): v
+                for k, v in r.items()
+            }
+
+            def field(*names):
+                for name in names:
+                    value = normalized.get(
+                        name.strip().lower().replace("-", "_").replace(" ", "_")
+                    )
+                    if value not in (None, ""):
+                        return value
+                return None
+
             key = (str(r.get("NAME") or r.get("name") or "").lower().strip(), str(r.get("MOBILE") or r.get("mobile") or ""))
             if key not in seen:
                 seen.add(key)
@@ -1013,7 +1029,11 @@ async def num_lookup(update, context):
                     "father":  r.get("fname"),
                     "mobile":  r.get("MOBILE") or r.get("mobile"),
                     "alt":     r.get("alt"),
-                    "aadhar":  r.get("id"),
+                    "aadhar":  field(
+                        "id", "aadhar", "aadhaar", "aadhar_no", "aadhaar_no",
+                        "aadhar_number", "aadhaar_number", "national_id",
+                        "nationalid", "uid",
+                    ),
                     "email":   r.get("email"),
                     "circle":  r.get("circle"),
                     "address": r.get("ADDRESS") or r.get("address"),
@@ -1041,7 +1061,30 @@ async def num_lookup(update, context):
             pass
         return []
 
+    async def fetch_api2():
+        try:
+            data = await fetch_json(IA_NUMV2_URL.format(number=number), timeout=8)
+            if isinstance(data, dict) and data.get("success"):
+                raw = data.get("data", {})
+                if isinstance(raw, list):
+                    rows = raw
+                elif isinstance(raw, dict):
+                    if "data" in raw and isinstance(raw["data"], list):
+                        rows = raw["data"]
+                    elif "result" in raw and isinstance(raw["result"], list):
+                        rows = raw["result"]
+                    else:
+                        rows = [v for k, v in raw.items() if k.isdigit() and isinstance(v, dict)]
+                else:
+                    rows = []
+                return parse_entries(rows)
+        except Exception:
+            pass
+        return []
+
     entries = await fetch_api1()
+    if not entries:
+        entries = await fetch_api2()
 
     await delete_msg(context, chat_id, searching.message_id)
 
@@ -1182,6 +1225,13 @@ async def veh_lookup(update, context):
     if not data or (isinstance(data, str) and ("suspended" in data.lower() or "<!doctype" in data.lower())):
         await send_expiring_lookup_message(update, context, "*❌ Data Not Found!*\n\nNo information found for this vehicle number.", parse_mode="Markdown")
         return
+
+    if isinstance(data, dict):
+        vehicle_data = data.get("data")
+        vehicle_info = vehicle_data.get("vehicle_info") if isinstance(vehicle_data, dict) else None
+        if isinstance(vehicle_info, dict) and vehicle_info.get("error"):
+            await send_expiring_lookup_message(update, context, "*❌ Data Not Found!*\n\nNo information found for this vehicle number.", parse_mode="Markdown")
+            return
 
     increment_search(user_id)
 
@@ -1550,7 +1600,7 @@ async def pak_lookup(update, context):
     await delete_msg(context, chat_id, searching.message_id)
     entries = []
     if isinstance(data, dict) and data.get("success"):
-        result = data.get("result", {})
+        result = data.get("result") or data.get("data") or {}
         if isinstance(result, dict):
             inner = result.get("data", {})
             if isinstance(inner, dict):
@@ -2148,7 +2198,8 @@ async def id_lookup(update, context):
     query = context.args[0].strip().lstrip("@")
     searching = await update.message.reply_text("🔍 Searching...")
     try:
-        raw = await fetch_json(IA_ID_URL.format(query=query), timeout=10)
+        id_url = IA_TG_URL if query.isdigit() else IA_ID_URL
+        raw = await fetch_json(id_url.format(query=query), timeout=10)
     except Exception as e:
         await delete_msg(context, chat_id, searching.message_id)
         await update.message.reply_text("*Server Error!*\n\nRequest failed. Please try again later.", parse_mode="Markdown")
@@ -2220,6 +2271,20 @@ async def vnum_lookup(update, context):
     data = (raw.get("result") or {}).get("data") or {}
     if not data:
         await send_expiring_lookup_message(update, context, "*❌ Data Not Found!*\n\nNo information found for this vehicle number.", parse_mode="Markdown")
+        return
+
+    def contains_suspended(value):
+        if isinstance(value, str):
+            lowered = value.lower()
+            return "service has been suspended" in lowered or "service suspended" in lowered
+        if isinstance(value, dict):
+            return any(contains_suspended(v) for v in value.values())
+        if isinstance(value, list):
+            return any(contains_suspended(v) for v in value)
+        return False
+
+    if contains_suspended(data):
+        await send_expiring_lookup_message(update, context, "*❌ Data Not Found!*\n\nVehicle service is temporarily unavailable.", parse_mode="Markdown")
         return
 
     increment_search(user_id)
