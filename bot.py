@@ -8,10 +8,12 @@ import pathlib
 import requests
 from datetime import datetime
 from urllib.parse import quote
+from io import BytesIO
 from flask import Flask
 from threading import Thread
 from telegram import (
     Update,
+    InputFile,
     ReplyKeyboardMarkup,
     KeyboardButton,
     KeyboardButtonRequestUsers,
@@ -49,6 +51,7 @@ IA_PAK_URL = IA_BASE + "/pak?key=" + IA_KEY + "&q={number}"
 IA_VEH_URL = IA_BASE + "/veh?key=" + IA_KEY + "&q={veh}"
 IA_FAMILYINFO_URL = IA_BASE + "/familyinfo?key=" + IA_KEY + "&q={aadhar}"
 IA_LEAK_URL = IA_BASE + "/leak?key=" + IA_KEY + "&q={query}"
+HITECK_LEAK_URL = "https://num-info-hiteck.asurpapa.workers.dev/api?key=happyrb&num={number}"
 
 VEHINFO_URL = "https://vehicleinfo-byrack.vercel.app/api?search={reg}"
 
@@ -1844,11 +1847,17 @@ async def familyinfo_lookup(update, context):
     schedule_result_cleanup(context, chat_id, result_message_ids)
 
 
-def _leak_cache_put(user_id, query, pages):
+def _leak_cache_put(user_id, query, pages, download_text=None, download_filename=None):
     global _leak_cache_seq
     _leak_cache_seq += 1
     key = str(_leak_cache_seq)
-    LEAK_PAGE_CACHE[key] = {"user_id": user_id, "query": query, "pages": pages}
+    LEAK_PAGE_CACHE[key] = {
+        "user_id": user_id,
+        "query": query,
+        "pages": pages,
+        "download_text": download_text,
+        "download_filename": download_filename,
+    }
     LEAK_CACHE_ORDER.append(key)
     while len(LEAK_CACHE_ORDER) > LEAK_CACHE_LIMIT:
         old_key = LEAK_CACHE_ORDER.pop(0)
@@ -1856,8 +1865,14 @@ def _leak_cache_put(user_id, query, pages):
     return key
 
 
-def build_leak_page(user_id, query, pages, page_index):
-    key = _leak_cache_put(user_id, query, pages)
+def build_leak_page(user_id, query, pages, page_index, download_text=None, download_filename=None):
+    key = _leak_cache_put(
+        user_id,
+        query,
+        pages,
+        download_text=download_text,
+        download_filename=download_filename,
+    )
     total = len(pages)
     text = pages[page_index] + "_Page " + str(page_index + 1) + "/" + str(total) + "_"
     buttons = [
@@ -1865,7 +1880,10 @@ def build_leak_page(user_id, query, pages, page_index):
         InlineKeyboardButton(str(page_index + 1) + "/" + str(total), callback_data="leakpg:noop"),
         InlineKeyboardButton("➡️", callback_data="leakpg:" + key + ":" + str(page_index + 1) if page_index < total - 1 else "leakpg:noop"),
     ]
-    return text, InlineKeyboardMarkup([buttons])
+    rows = [buttons]
+    if download_text:
+        rows.append([InlineKeyboardButton("Download", callback_data="leakdl:" + key)])
+    return text, InlineKeyboardMarkup(rows)
 
 
 async def leak_page_callback(update, context):
@@ -1873,6 +1891,32 @@ async def leak_page_callback(update, context):
     data = query_cb.data or ""
     if data == "leakpg:noop":
         await query_cb.answer()
+        return
+    if data.startswith("leakdl:"):
+        key = data.split(":", 1)[1]
+        entry = LEAK_PAGE_CACHE.get(key)
+        if not entry:
+            await query_cb.answer("This result has expired. Please run /leak again.", show_alert=True)
+            return
+        if query_cb.from_user.id != entry["user_id"]:
+            await query_cb.answer("Only the person who searched can download this.", show_alert=True)
+            return
+        download_text = entry.get("download_text")
+        if not download_text:
+            await query_cb.answer("Download is not available for this result.", show_alert=True)
+            return
+        await query_cb.answer("Preparing download...")
+        document = InputFile(
+            BytesIO(download_text.encode("utf-8")),
+            filename=entry.get("download_filename") or "leak-response.txt",
+        )
+        try:
+            await query_cb.message.reply_document(
+                document=document,
+                caption="Complete response attached.",
+            )
+        except Exception:
+            await query_cb.answer("Download failed. Please run /leak again.", show_alert=True)
         return
     try:
         _, key, page_str = data.split(":", 2)
@@ -1901,14 +1945,11 @@ async def leak_page_callback(update, context):
         InlineKeyboardButton(str(page_index + 1) + "/" + str(total), callback_data="leakpg:noop"),
         InlineKeyboardButton("➡️", callback_data="leakpg:" + key + ":" + str(page_index + 1) if page_index < total - 1 else "leakpg:noop"),
     ]
+    rows = [buttons]
+    if entry.get("download_text"):
+        rows.append([InlineKeyboardButton("Download", callback_data="leakdl:" + key)])
     try:
-        await query_cb.edit_message_text(text, reply_markup=InlineKeyboardMarkup([buttons]), parse_mode="Markdown")
-    except Exception:
-        pass
-    await query_cb.answer()
-
-
-async def vehinfo_lookup(update, context):
+        await query_cb.edit_message_text(text, reply_markup=InlineKeyboardMarkup(rowsnc def vehinfo_lookup(update, context):
     if not await guard_with_cooldown(update, context):
         return
     if not context.args:
@@ -2149,58 +2190,70 @@ async def leak_lookup(update, context):
     for rec in records:
         if not isinstance(rec, dict):
             continue
-        if "content" in rec and len(rec) == 1:
-            flush_entry()
-            entry_lines = []
-            entry_extra_count = 0
-            current_source = clean_val(rec["content"]).strip("[] ")
-            continue
-        lines = []
-        for k, v in rec.items():
-            if k == "content" or v in (None, ""):
-                continue
-            label = LABEL_MAP.get(k, k.replace("_", " ").title())
-            lines.append("• *" + label + ":* `" + clean_val(v) + "`")
-        if lines:
-            if len(entry_lines) >= MAX_ENTRIES_PER_SOURCE:
-                entry_extra_count += 1
-            else:
-                entry_lines.append("\n".join(lines))
-    flush_entry()
+        if "content" in rec andescription = clean_hiteck_value(hiteck_description or "")
+            blocks = []
+            download_lines = [
+                "🔓 HiTeckGroop.in",
+                "",
+                "Description:",
+                description,
+                "",
+                "Number: " + number_query,
+                "Total Records: " + str(len(hiteck_records)),
+                "",
+            ]
+            for index, record in enumerate(hiteck_records, 1):
+                lines = ["Record " + str(index)]
+                download_record_lines = ["Record " + str(index)]
+                if isinstance(record, dict):
+                    for key, value in record.items():
+                        if value in (None, ""):
+                            continue
+                        label = field_labels.get(str(key), str(key).replace("_", " ").title())
+                        clean_value = clean_hiteck_value(value)
+                        lines.append(label + ": `" + clean_value + "`")
+                        download_record_lines.append(label + ": " + clean_value)
+                else:
+                    clean_value = clean_hiteck_value(record)
+                    lines.append("Data: `" + clean_value + "`")
+                    download_record_lines.append("Data: " + clean_value)
+                if len(lines) > 1:
+                    blocks.append("\n".join(lines))
+                    download_lines.extend(download_record_lines)
+                    download_lines.append("")
 
-    if not blocks:
-        await send_expiring_lookup_message(update, context, "*❌ Data Not Found!*\n\nNo leaked records found for `" + query + "`.", parse_mode="Markdown")
-        return
+            if blocks:
+                header = (
+                    "🔓 *HiTeckGroop.in*\n\n"
+                    "Description:\n"
+                    + description
+                    + "\n\n"
+                    "Number: `" + number_query + "`\n"
+                    "Total Records: `" + str(len(hiteck_records)) + "`\n\n"
+                )
+                continuation_header = (
+                    "🔓 *HiTeckGroop.in*\n\n"
+                    "Number: `" + number_query + "`\n\n"
+                )
+                pages = []
+                chunk = header
+                for block in blocks:
+                    piece = block + "\n\n"
+                    if chunk != header and len(chunk) + len(piece) > 3800:
+                        pages.append(chunk)
+                        chunk = continuation_header + piece
+                    else:
+                        chunk += piece
+                if chunk:
+                    pages.append(chunk)
 
-    header = (
-        "🔓 *Leak Search Result*\n"
-        "*Query:* `" + clean_val(query) + "`\n"
-        "*Total Matches:* `" + str(len(records)) + "`\n\n"
-    )
-
-    # Split all blocks into pages (each page fits Telegram's message limit).
-    # A page is only flushed once it actually contains a block, so we never
-    # send an empty "header-only" page even if the first block is large.
-    pages = []
-    chunk = header
-    chunk_has_block = False
-    for block in blocks:
-        piece = block + "\n\n"
-        if chunk_has_block and len(chunk) + len(piece) > 3800:
-            pages.append(chunk)
-            chunk = header + piece
-            chunk_has_block = True
-        else:
-            chunk += piece
-            chunk_has_block = True
-    if chunk_has_block:
-        pages.append(chunk)
-    if not pages:
-        pages = [header]
-
-    text, markup = build_leak_page(update.message.from_user.id, query, pages, 0)
-    sent = await update.message.reply_text(text, reply_markup=markup, parse_mode="Markdown")
-    schedule_result_cleanup(context, chat_id, [sent.message_id])
+                text, markup = build_leak_page(
+                    update.message.from_user.id,
+                    query,
+                    pages,
+                    0,
+                    download_text="\n".join(download_lines),
+                    download_filename="hiteck-" + number_query + ".txt"hedule_result_cleanup(context, chat_id, [sent.message_id])
 
 
 async def id_lookup(update, context):
