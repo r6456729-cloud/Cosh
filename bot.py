@@ -42,6 +42,7 @@ IA_NUMV2_URL = IA_BASE + "/numv2?key=" + IA_KEY + "&q={number}"
 IA_ADHAR_URL = IA_BASE + "/adhar?key=" + IA_KEY + "&q={aadhar}"
 ROOTX_TG_NUM_URL = "https://rootx-osint.in/?type=tg_num&key=abror&query={term}"
 TG_NUM_FALLBACK_URL = "https://api.igfollows.site/TG/index.php?type=user&key=OGGYxKRISH&term={term}"
+PAID_TG_NUM_FALLBACK_URL = "https://paid.originalapis.workers.dev/tg?key=Harsha&id={id}"
 IA_IFSC_URL = IA_BASE + "/ifsc?key=" + IA_KEY + "&q={code}"
 IA_INSTA_URL = IA_BASE + "/insta?key=" + IA_KEY + "&q={username}"
 IA_PAK_URL = IA_BASE + "/pak?key=" + IA_KEY + "&q={number}"
@@ -354,7 +355,11 @@ def check_cooldown(user_id):
 async def fetch_json(url, timeout=5):
     loop = asyncio.get_event_loop()
     def _get():
-        resp = requests.get(url, timeout=timeout)
+        resp = requests.get(
+            url,
+            timeout=timeout,
+            headers={"User-Agent": "Mozilla/5.0"},
+        )
         resp.raise_for_status()
         return resp.json()
     return await loop.run_in_executor(None, _get)
@@ -1356,6 +1361,11 @@ async def lookup(update, context):
                 if d.get("number") or d.get("tg_id"):
                     return True
                 return False
+        # Some providers return status=success with an empty result object.
+        if "result" in d and isinstance(d.get("result"), (dict, list)) and not d.get("result"):
+            return False
+        if "data" in d and isinstance(d.get("data"), (dict, list)) and not d.get("data"):
+            return False
         return True
 
     async def _try_fetch(url):
@@ -1375,6 +1385,13 @@ async def lookup(update, context):
     if data is None:
         data = await _try_fetch(
             TG_NUM_FALLBACK_URL.format(term=quote(term, safe="@"))
+        )
+
+    # Final Telegram-ID-to-number fallback after the other providers fail.
+    # This endpoint accepts a numeric Telegram ID through the `id` parameter.
+    if data is None and is_number:
+        data = await _try_fetch(
+            PAID_TG_NUM_FALLBACK_URL.format(id=quote(digits_only, safe=""))
         )
 
     await delete_msg(context, chat_id, searching.message_id)
@@ -1404,6 +1421,9 @@ async def lookup(update, context):
         "response_time", "used today", "used_today", "daily limit",
         "daily_limit", "valid days", "valid_days", "expires on", "expires_on",
         "status code", "status_code", "http status", "http_status",
+        "api developer", "api_developer", "today used", "today_used",
+        "daily used", "daily_used", "remaining", "requests left",
+        "requests_left",
     }
     LABEL_MAP = {
         "number": "Number", "phone": "Number", "mobile": "Number",
