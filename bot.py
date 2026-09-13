@@ -53,6 +53,15 @@ IA_FAMILYINFO_URL = IA_BASE + "/familyinfo?key=" + IA_KEY + "&q={aadhar}"
 IA_LEAK_URL = IA_BASE + "/leak?key=" + IA_KEY + "&q={query}"
 HITECK_LEAK_URL = "https://num-info-hiteck.asurpapa.workers.dev/api?key=happyrb&num={number}"
 
+YESUKIE_BASE = "https://yesukie.vercel.app"
+YESUKIE_TRUECALLER_URL = YESUKIE_BASE + "/truecaller?q={query}"
+YESUKIE_FAMILYINFO_URL = YESUKIE_BASE + "/family-info?q={query}"
+YESUKIE_EMAIL_URL = YESUKIE_BASE + "/email-info?q={query}"
+YESUKIE_FREE_FIRE_URL = YESUKIE_BASE + "/free-fire-info?q={query}"
+YESUKIE_GST_URL = YESUKIE_BASE + "/gst-info?q={query}"
+YESUKIE_AADHAR_BANK_URL = YESUKIE_BASE + "/aadhar-to-bank?q={query}"
+YESUKIE_AADHAR_PAN_URL = YESUKIE_BASE + "/aadhar-to-pan-mask?q={query}"
+
 VEHINFO_URL = "https://vehicleinfo-byrack.vercel.app/api?search={reg}"
 
 IA_ID_URL    = IA_BASE + "/id?key="    + IA_KEY + "&q={query}"
@@ -390,6 +399,135 @@ def val(v):
     return str(v).strip()
 
 
+def _yesukie_payload(raw):
+    if raw in (None, "", [], {}):
+        return None
+    if isinstance(raw, dict):
+        status = str(raw.get("status", "")).lower()
+        message = str(
+            raw.get("message") or raw.get("msg") or raw.get("error") or ""
+        ).lower()
+        if raw.get("success") is False or status in (
+            "false", "0", "error", "fail", "failed"
+        ):
+            return None
+        if any(term in message for term in ("not found", "no data", "invalid")):
+            return None
+        for key in ("data", "result", "response", "info", "details"):
+            value = raw.get(key)
+            if value not in (None, "", [], {}):
+                return value
+        metadata = {
+            "success", "status", "message", "msg", "error", "code",
+            "developer", "owner", "key", "cached", "time",
+        }
+        payload = {k: v for k, v in raw.items() if str(k).lower() not in metadata}
+        return payload or None
+    return raw
+
+
+_YESUKIE_SKIP_KEYS = {
+    "success", "status", "message", "msg", "error", "code", "key",
+    "developer", "owner", "admin", "cached", "time", "timestamp",
+    "request_id", "requestid", "api_key", "apikey", "credit",
+    "credits", "powered_by", "poweredby", "response_time",
+    "responsetime", "remaining", "limit", "daily_limit",
+}
+
+
+def _flatten_yesukie_data(value, prefix=""):
+    items = []
+    if isinstance(value, dict):
+        for key, child in value.items():
+            if str(key).strip().lower().replace("-", "_").replace(" ", "_") in _YESUKIE_SKIP_KEYS:
+                continue
+            child_prefix = str(key) if not prefix else prefix + "_" + str(key)
+            items.extend(_flatten_yesukie_data(child, child_prefix))
+    elif isinstance(value, list):
+        for index, child in enumerate(value, 1):
+            child_prefix = prefix + "_" + str(index) if prefix else str(index)
+            items.extend(_flatten_yesukie_data(child, child_prefix))
+    elif value not in (None, ""):
+        text = str(value).replace("`", "'").strip()
+        if text and text.lower() not in ("none", "null", "n/a"):
+            items.append((prefix or "Data", text))
+    return items
+
+
+def _yesukie_label(key):
+    label = str(key).replace("_", " ").replace("-", " ").strip()
+    return label.title() if label else "Data"
+
+
+async def _yesukie_lookup(
+    update,
+    context,
+    endpoint,
+    usage,
+    search_text,
+    title,
+    not_found_text,
+    normalize=None,
+):
+    if not await guard_with_cooldown(update, context):
+        return
+    if not context.args:
+        await update.message.reply_text("*Usage:* `" + usage + "`", parse_mode="Markdown")
+        return
+
+    user_id = update.message.from_user.id
+    chat_id = update.message.chat_id
+    query = " ".join(context.args).strip()
+    if normalize == "aadhar":
+        query = query.replace(" ", "").replace("-", "")
+        if len(query) != 12 or not query.isdigit():
+            await update.message.reply_text(
+                "*❌ Invalid Aadhar!*\n\nPlease enter a valid 12-digit Aadhar number.",
+                parse_mode="Markdown",
+            )
+            return
+    elif normalize == "phone":
+        query = query.replace("+", "").replace(" ", "").replace("-", "")
+
+    searching = await update.message.reply_text(search_text)
+    try:
+        raw = await fetch_json(
+            endpoint.format(query=quote(query, safe="")),
+            timeout=15,
+        )
+    except Exception as e:
+        await delete_msg(context, chat_id, searching.message_id)
+        await update.message.reply_text(
+            "*Server Error!*\n\nRequest failed. Please try again later.",
+            parse_mode="Markdown",
+        )
+        await log_error_to_admin(context, title + ": " + str(e))
+        return
+
+    await delete_msg(context, chat_id, searching.message_id)
+    payload = _yesukie_payload(raw)
+    fields = _flatten_yesukie_data(payload)
+    if not fields:
+        await send_expiring_lookup_message(
+            update,
+            context,
+            "*❌ Data Not Found!*\n\n" + not_found_text,
+            parse_mode="Markdown",
+        )
+        return
+
+    increment_search(user_id)
+    lines = ["🔎 *" + title + "*", "", "*Query:* `" + query + "`", ""]
+    for key, value in fields[:80]:
+        lines.append("*" + _yesukie_label(key) + ":* `" + value + "`")
+
+    text = "\n".join(lines)
+    if len(text) > 4000:
+        text = text[:3990] + "\n_..._"
+    sent = await update.message.reply_text(text, parse_mode="Markdown")
+    schedule_result_cleanup(context, chat_id, [sent.message_id])
+
+
 async def delete_msg(context, chat_id, msg_id):
     try:
         await context.bot.delete_message(chat_id=chat_id, message_id=msg_id)
@@ -633,6 +771,10 @@ async def settings_command(update, context):
         "Use `/aadhar <12-digit number>` to fetch linked mobile, address, email\n\n"
         "👨‍👩‍👧‍👦 *Family Info Lookup*\n"
         "Use `/familyinfo <12-digit Aadhar>` to fetch family member details\n\n"
+        "🏦 *Aadhar to Bank Lookup*\n"
+        "Use `/aadharbank <12-digit Aadhar>` to fetch bank information\n\n"
+        "🪪 *Aadhar to Masked PAN Lookup*\n"
+        "Use `/aadharpan <12-digit Aadhar>` to fetch masked PAN information\n\n"
         "🔓 *Leak Search*\n"
         "Use `/leak <email/phone/username>` to search leaked databases\n\n"
         "🌐 *IP Address Lookup*\n"
@@ -643,6 +785,12 @@ async def settings_command(update, context):
         "Use `/vehinfo <reg number>` for detailed RTO vehicle & insurance info\n\n"
         "📞 *Truecaller Lookup*\n"
         "Use `/true <number with country code>` to fetch caller ID\n\n"
+        "✉️ *Email Lookup*\n"
+        "Use `/email <email address>` to fetch email information\n\n"
+        "🎮 *Free Fire Info*\n"
+        "Use `/ffinfo <UID>` to fetch Free Fire player information\n\n"
+        "🧾 *GST Lookup*\n"
+        "Use `/gst <GST number>` to fetch GST information\n\n"
         "🔎 *Telegram ID Lookup*\n"
         "Use `/id <username or UID>` to check TG ID, bot, premium, scam status\n\n"
         "🚗 *Vehicle Number Lookup*\n"
@@ -721,6 +869,14 @@ async def help_command(update, context):
         "  Use /familyinfo followed by 12-digit Aadhar number.\n\n"
         "  Example:\n"
         "   • `/familyinfo 652507323571`\n\n"
+        "🏦 *Aadhar to Bank Lookup*\n"
+        "  Use /aadharbank followed by 12-digit Aadhar number.\n\n"
+        "  Example:\n"
+        "   • `/aadharbank 123456789012`\n\n"
+        "🪪 *Aadhar to Masked PAN Lookup*\n"
+        "  Use /aadharpan followed by 12-digit Aadhar number.\n\n"
+        "  Example:\n"
+        "   • `/aadharpan 123456789012`\n\n"
         "🔓 *Leak Search*\n"
         "  Use /leak followed by an email, phone number, or username.\n\n"
         "  Example:\n"
@@ -733,6 +889,18 @@ async def help_command(update, context):
         "  Use /true followed by a number with country code (no + or spaces).\n\n"
         "  Example:\n"
         "   • `/true 919306387163`\n\n"
+        "✉️ *Email Lookup*\n"
+        "  Use /email followed by an email address.\n\n"
+        "  Example:\n"
+        "   • `/email example@gmail.com`\n\n"
+        "🎮 *Free Fire Info*\n"
+        "  Use /ffinfo followed by a Free Fire UID.\n\n"
+        "  Example:\n"
+        "   • `/ffinfo 552756708`\n\n"
+        "🧾 *GST Lookup*\n"
+        "  Use /gst followed by a GST number.\n\n"
+        "  Example:\n"
+        "   • `/gst 29AACCF0683K1ZD`\n\n"
         "🌐 *IP Address Lookup*\n"
         "  Use /ip followed by any IPv4 address.\n\n"
         "  Example:\n"
@@ -771,10 +939,15 @@ async def help_command(update, context):
         "  /num         — Phone number lookup\n"
         "  /aadhar      — Aadhar lookup\n"
         "  /familyinfo  — Family info via Aadhar\n"
+        "  /aadharbank  — Aadhar to bank lookup\n"
+        "  /aadharpan   — Aadhar to masked PAN lookup\n"
         "  /leak        — Leak database search\n"
         "  /veh         — Vehicle lookup\n"
         "  /vehinfo     — Detailed RTO vehicle info\n"
         "  /true        — Truecaller lookup\n"
+        "  /email       — Email information lookup\n"
+        "  /ffinfo      — Free Fire information lookup\n"
+        "  /gst         — GST information lookup\n"
         "  /ip          — IP address lookup\n"
         "  /ifsc        — Bank IFSC code lookup\n"
         "  /insta       — Instagram profile lookup\n"
@@ -1748,103 +1921,16 @@ async def ip_lookup(update, context):
 
 
 async def familyinfo_lookup(update, context):
-    if not await guard_with_cooldown(update, context):
-        return
-    if not context.args:
-        await update.message.reply_text(
-            "*Usage:* `/familyinfo 652507323571`\n\n_Enter 12-digit Aadhar number._",
-            parse_mode="Markdown",
-        )
-        return
-    user_id = update.message.from_user.id
-    chat_id = update.message.chat_id
-
-    aadhar = context.args[0].replace(" ", "").replace("-", "")
-    if len(aadhar) != 12 or not aadhar.isdigit():
-        await update.message.reply_text("*❌ Invalid Aadhar!*\n\nPlease enter a valid 12-digit Aadhar number.", parse_mode="Markdown")
-        return
-
-    searching = await update.message.reply_text("🔍 Searching family info...")
-    try:
-        raw = await fetch_json(IA_FAMILYINFO_URL.format(aadhar=aadhar), timeout=12)
-    except Exception as e:
-        await delete_msg(context, chat_id, searching.message_id)
-        await update.message.reply_text("*Server Error!*\n\nRequest failed. Please try again later.", parse_mode="Markdown")
-        await log_error_to_admin(context, "familyinfo_lookup: " + str(e))
-        return
-
-    await delete_msg(context, chat_id, searching.message_id)
-
-    if not isinstance(raw, dict) or not raw.get("success"):
-        await send_expiring_lookup_message(update, context, "*❌ Data Not Found!*\n\nNo family info found for this Aadhar.", parse_mode="Markdown")
-        return
-
-    data = raw.get("data") or raw.get("result")
-    if not data:
-        await send_expiring_lookup_message(update, context, "*❌ Data Not Found!*\n\nNo family info found for this Aadhar.", parse_mode="Markdown")
-        return
-
-    increment_search(user_id)
-
-    SKIP_KEYS = {"status", "message", "msg", "error", "success", "code", "key", "developer", "attempt", "cached"}
-    LABEL_MAP = {
-        "name": "Name", "fname": "Father Name", "mobile": "Mobile",
-        "alt": "Alt Mobile", "id": "Aadhar", "email": "Email",
-        "address": "Address", "circle": "Circle", "dob": "DOB",
-        "gender": "Gender", "state": "State", "district": "District",
-        "pincode": "Pincode", "relation": "Relation",
-    }
-
-    def flatten_family(obj, prefix=""):
-        items = {}
-        if isinstance(obj, dict):
-            for k, v in obj.items():
-                items.update(flatten_family(v, k))
-        elif isinstance(obj, list) and len(obj) > 0:
-            for i, item in enumerate(obj):
-                sub = flatten_family(item, prefix)
-                for sk, sv in sub.items():
-                    items[sk + "_" + str(i) if sk in items else sk] = sv
-        else:
-            if prefix and str(obj).strip() and str(obj).lower() not in ("none", "null", "n/a", "", "0"):
-                items[prefix.lower()] = str(obj).strip()
-        return items
-
-    if isinstance(data, list):
-        members = data
-    elif isinstance(data, dict):
-        members = data.get("members") or data.get("family") or data.get("results") or [data]
-    else:
-        members = []
-
-    result_message_ids = []
-    if members and isinstance(members, list) and len(members) > 0:
-        for i, member in enumerate(members, 1):
-            flat = flatten_family(member)
-            lines = ["👨‍👩‍👧‍👦 *Family Info — Member " + str(i) + "/" + str(len(members)) + "*\n\n*Aadhar:* `" + aadhar + "`"]
-            for k, v in flat.items():
-                if any(k.startswith(sk) for sk in SKIP_KEYS):
-                    continue
-                base_key = k.split("_")[0] if "_" in k else k
-                label = LABEL_MAP.get(base_key, k.replace("_", " ").title())
-                lines.append("*" + label + ":* `" + v + "`")
-            if len(lines) > 1:
-                sent = await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
-                result_message_ids.append(sent.message_id)
-    else:
-        flat = flatten_family(data)
-        lines = ["👨‍👩‍👧‍👦 *Family Info*\n\n*Aadhar:* `" + aadhar + "`"]
-        for k, v in flat.items():
-            if k in SKIP_KEYS:
-                continue
-            label = LABEL_MAP.get(k, k.replace("_", " ").title())
-            lines.append("*" + label + ":* `" + v + "`")
-        if len(lines) <= 1:
-            await send_expiring_lookup_message(update, context, "*❌ Data Not Found!*\n\nNo family info found for this Aadhar.", parse_mode="Markdown")
-            return
-        sent = await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
-        result_message_ids.append(sent.message_id)
-    schedule_result_cleanup(context, chat_id, result_message_ids)
+    await _yesukie_lookup(
+        update,
+        context,
+        YESUKIE_FAMILYINFO_URL,
+        "/familyinfo 652507323571",
+        "🔍 Searching family info...",
+        "Family Info",
+        "No family info found for this Aadhar.",
+        normalize="aadhar",
+    )
 
 
 def _leak_cache_put(user_id, query, pages, download_text=None, download_filename=None):
@@ -1949,7 +2035,12 @@ async def leak_page_callback(update, context):
     if entry.get("download_text"):
         rows.append([InlineKeyboardButton("Download", callback_data="leakdl:" + key)])
     try:
-        await query_cb.edit_message_text(text, reply_markup=InlineKeyboardMarkup(rowsnc def vehinfo_lookup(update, context):
+        await query_cb.edit_message_text(text, reply_markup=InlineKeyboardMarkup(rows))
+    except Exception:
+        await query_cb.answer("⚠️ This result has expired. Please run /leak again.", show_alert=True)
+
+
+async def vehinfo_lookup(update, context):
     if not await guard_with_cooldown(update, context):
         return
     if not context.args:
@@ -2014,101 +2105,78 @@ async def leak_page_callback(update, context):
 
 
 async def true_lookup(update, context):
-    if not await guard_with_cooldown(update, context):
-        return
-    if not context.args:
-        await update.message.reply_text(
-            "*Usage:* `/true 919306387163`\n\n_Enter the number with country code, no + or spaces._",
-            parse_mode="Markdown",
-        )
-        return
-    user_id = update.message.from_user.id
-    chat_id = update.message.chat_id
-    phone = context.args[0].strip().replace("+", "").replace(" ", "")
+    await _yesukie_lookup(
+        update,
+        context,
+        YESUKIE_TRUECALLER_URL,
+        "/true 919306387163",
+        "🔍 Looking up caller ID...",
+        "Truecaller Lookup",
+        "No caller info found for this number.",
+        normalize="phone",
+    )
 
-    searching = await update.message.reply_text("🔍 Looking up caller ID...")
 
-    async def fetch_truecaller_api1():
-        try:
-            return await fetch_json(TRUECALLER_URL.format(phone=phone), timeout=15)
-        except Exception:
-            return None
+async def email_lookup(update, context):
+    await _yesukie_lookup(
+        update,
+        context,
+        YESUKIE_EMAIL_URL,
+        "/email example@gmail.com",
+        "🔍 Searching email info...",
+        "Email Info",
+        "No information found for this email.",
+    )
 
-    async def fetch_truecaller_api2():
-        try:
-            return await fetch_json(RACK_TRUECALLER_URL.format(phone=phone), timeout=15)
-        except Exception:
-            return None
 
-    raw1, raw2 = await asyncio.gather(fetch_truecaller_api1(), fetch_truecaller_api2())
+async def ffinfo_lookup(update, context):
+    await _yesukie_lookup(
+        update,
+        context,
+        YESUKIE_FREE_FIRE_URL,
+        "/ffinfo 552756708",
+        "🔍 Searching Free Fire info...",
+        "Free Fire Info",
+        "No information found for this Free Fire UID.",
+    )
 
-    await delete_msg(context, chat_id, searching.message_id)
 
-    record = raw1.get("record") if isinstance(raw1, dict) else None
-    rack_data = raw2.get("data") if isinstance(raw2, dict) and raw2.get("success") else None
+async def gst_lookup(update, context):
+    await _yesukie_lookup(
+        update,
+        context,
+        YESUKIE_GST_URL,
+        "/gst 29AACCF0683K1ZD",
+        "🔍 Searching GST info...",
+        "GST Info",
+        "No information found for this GST number.",
+    )
 
-    # Need at least one source to have data
-    has_api1 = isinstance(record, dict) and record.get("name")
-    has_api2 = isinstance(rack_data, dict) and rack_data
 
-    if not has_api1 and not has_api2:
-        await send_expiring_lookup_message(update, context, "*❌ Data Not Found!*\n\nNo caller info found for this number.", parse_mode="Markdown")
-        return
+async def aadharbank_lookup(update, context):
+    await _yesukie_lookup(
+        update,
+        context,
+        YESUKIE_AADHAR_BANK_URL,
+        "/aadharbank 123456789012",
+        "🔍 Searching Aadhaar-to-bank info...",
+        "Aadhaar to Bank Info",
+        "No bank information found for this Aadhar.",
+        normalize="aadhar",
+    )
 
-    increment_search(user_id)
 
-    display_number = phone
-    if not display_number.startswith("+"):
-        display_number = "+" + display_number
-    wa_link = "https://wa.me/" + display_number
-    tg_link = "https://t.me/" + display_number
-
-    # Skip internal/watermark keys from rack API
-    RACK_SKIP = {"owner", "admin", "Number"}
-
-    lines = ["┏━━━━━━━━━━━━━━━━━┓", "┃  📞 *Truecaller Lookup*", "┗━━━━━━━━━━━━━━━━━┛", ""]
-    lines.append("*Number:* `" + display_number + "` 🇮🇳")
-    lines.append("")
-
-    # --- Section 1: Basic Info (from whocalled.in) ---
-    if has_api1:
-        lines.append("🔍 *Basic Info*")
-        lines.append("• *Name:* `" + val(record.get("name")) + "`")
-        if val(record.get("circle")) != "None":
-            lines.append("• *Carrier:* `" + val(record.get("circle")) + "`")
-        if val(record.get("email")) != "None":
-            lines.append("• *Email:* `" + val(record.get("email")) + "`")
-        if val(record.get("address")) != "None":
-            lines.append("• *Address:* `" + val(record.get("address")) + "`")
-        lines.append("")
-
-    # --- Section 2: Advanced Info (from rack-72au) ---
-    if has_api2:
-        # Priority fields shown first
-        PRIORITY_KEYS = [
-            "Owner Name", "Owner Address", "Connection", "SIM Card",
-            "Mobile State", "Country", "Hometown", "Language",
-            "Mobile Locations", "Tower Locations", "Reference City",
-            "IMEI Number", "IP Address", "MAC Address",
-            "Tracker ID", "Tracking History", "Complaints",
-        ]
-        lines.append("📡 *Advanced Info*")
-        shown = set()
-        for k in PRIORITY_KEYS:
-            v = rack_data.get(k)
-            if v and k not in RACK_SKIP:
-                lines.append("• *" + k + ":* `" + str(v) + "`")
-                shown.add(k)
-        # Any remaining keys not in priority list
-        for k, v in rack_data.items():
-            if k not in shown and k not in RACK_SKIP and v:
-                lines.append("• *" + k + ":* `" + str(v) + "`")
-        lines.append("")
-
-    lines.append("[💬 WhatsApp](" + wa_link + ") | [✈️ Telegram](" + tg_link + ")")
-
-    sent = await update.message.reply_text("\n".join(lines), parse_mode="Markdown", disable_web_page_preview=True)
-    schedule_result_cleanup(context, chat_id, [sent.message_id])
+async def aadharpan_lookup(update, context):
+    await _yesukie_lookup(
+        update,
+        context,
+        YESUKIE_AADHAR_PAN_URL,
+        "/aadharpan 123456789012",
+        "🔍 Searching masked PAN info...",
+        "Aadhaar to Masked PAN",
+        "No masked PAN information found for this Aadhar.",
+        normalize="aadhar",
+    )
 
 
 async def leak_lookup(update, context):
@@ -2180,80 +2248,81 @@ async def leak_lookup(update, context):
     entry_lines = []
     entry_extra_count = 0
 
-    def flush_entry():
-        if entry_lines:
-            block = "📂 *Source:* `" + current_source + "`\n" + "\n".join(entry_lines)
-            if entry_extra_count > 0:
-                block += "\n_...+" + str(entry_extra_count) + " more from this source_"
-            blocks.append(block)
-
     for rec in records:
         if not isinstance(rec, dict):
             continue
-        if "content" in rec andescription = clean_hiteck_value(hiteck_description or "")
-            blocks = []
-            download_lines = [
-                "🔓 HiTeckGroop.in",
-                "",
-                "Description:",
-                description,
-                "",
-                "Number: " + number_query,
-                "Total Records: " + str(len(hiteck_records)),
-                "",
-            ]
-            for index, record in enumerate(hiteck_records, 1):
-                lines = ["Record " + str(index)]
-                download_record_lines = ["Record " + str(index)]
-                if isinstance(record, dict):
-                    for key, value in record.items():
-                        if value in (None, ""):
-                            continue
-                        label = field_labels.get(str(key), str(key).replace("_", " ").title())
-                        clean_value = clean_hiteck_value(value)
-                        lines.append(label + ": `" + clean_value + "`")
-                        download_record_lines.append(label + ": " + clean_value)
-                else:
-                    clean_value = clean_hiteck_value(record)
-                    lines.append("Data: `" + clean_value + "`")
-                    download_record_lines.append("Data: " + clean_value)
-                if len(lines) > 1:
-                    blocks.append("\n".join(lines))
-                    download_lines.extend(download_record_lines)
-                    download_lines.append("")
+        source = (
+            rec.get("source")
+            or rec.get("database")
+            or rec.get("db")
+            or rec.get("table")
+            or "Unknown Source"
+        )
+        source_text = clean_val(source)
+        payload = rec.get("data")
+        if payload is None:
+            payload = rec.get("result")
+        if payload is None:
+            payload = rec
 
-            if blocks:
-                header = (
-                    "🔓 *HiTeckGroop.in*\n\n"
-                    "Description:\n"
-                    + description
-                    + "\n\n"
-                    "Number: `" + number_query + "`\n"
-                    "Total Records: `" + str(len(hiteck_records)) + "`\n\n"
-                )
-                continuation_header = (
-                    "🔓 *HiTeckGroop.in*\n\n"
-                    "Number: `" + number_query + "`\n\n"
-                )
-                pages = []
-                chunk = header
-                for block in blocks:
-                    piece = block + "\n\n"
-                    if chunk != header and len(chunk) + len(piece) > 3800:
-                        pages.append(chunk)
-                        chunk = continuation_header + piece
-                    else:
-                        chunk += piece
-                if chunk:
-                    pages.append(chunk)
+        block_lines = ["📂 *Source:* `" + source_text + "`"]
+        download_lines = ["Source: " + source_text]
 
-                text, markup = build_leak_page(
-                    update.message.from_user.id,
-                    query,
-                    pages,
-                    0,
-                    download_text="\n".join(download_lines),
-                    download_filename="hiteck-" + number_query + ".txt"hedule_result_cleanup(context, chat_id, [sent.message_id])
+        if isinstance(payload, dict):
+            for key, value in payload.items():
+                if value in (None, ""):
+                    continue
+                key_text = str(key).strip().lower().replace("-", "_").replace(" ", "_")
+                label = LABEL_MAP.get(key_text, str(key).replace("_", " ").title())
+                clean_value = clean_val(value)
+                block_lines.append("*" + label + ":* `" + clean_value + "`")
+                download_lines.append(label + ": " + clean_value)
+        elif payload not in (None, ""):
+            clean_value = clean_val(payload)
+            block_lines.append("*Data:* `" + clean_value + "`")
+            download_lines.append("Data: " + clean_value)
+
+        if len(block_lines) > 1:
+            blocks.append("\n".join(block_lines))
+            entry_lines.extend(download_lines)
+            entry_lines.append("")
+
+    if not blocks:
+        await send_expiring_lookup_message(
+            update,
+            context,
+            "*❌ Data Not Found!*\n\nNo readable leaked records found for `" + query + "`.",
+            parse_mode="Markdown",
+        )
+        return
+
+    download_text = "Leak Search: " + query + "\n\n" + "\n".join(entry_lines)
+    pages = []
+    chunk = "🔓 *Leak Search Result*\n\n*Query:* `" + clean_val(query) + "`\n\n"
+    for block in blocks:
+        piece = block + "\n\n"
+        if len(chunk) > 80 and len(chunk) + len(piece) > 3800:
+            pages.append(chunk)
+            chunk = "🔓 *Leak Search Result — Continued*\n\n" + piece
+        else:
+            chunk += piece
+    if chunk:
+        pages.append(chunk)
+
+    text, markup = build_leak_page(
+        update.message.from_user.id,
+        query,
+        pages,
+        0,
+        download_text=download_text,
+        download_filename="leak-" + clean_val(query).replace("/", "_") + ".txt",
+    )
+    sent = await update.message.reply_text(
+        text,
+        reply_markup=markup,
+        parse_mode="Markdown",
+    )
+    schedule_result_cleanup(context, chat_id, [sent.message_id])
 
 
 async def id_lookup(update, context):
@@ -2909,10 +2978,15 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("pak", pak_lookup))
     app.add_handler(CommandHandler("ip", ip_lookup))
     app.add_handler(CommandHandler("familyinfo", familyinfo_lookup))
+    app.add_handler(CommandHandler("aadharbank", aadharbank_lookup))
+    app.add_handler(CommandHandler("aadharpan", aadharpan_lookup))
     app.add_handler(CommandHandler("leak", leak_lookup))
     app.add_handler(CallbackQueryHandler(leak_page_callback, pattern="^leakpg:"))
     app.add_handler(CommandHandler("vehinfo", vehinfo_lookup))
     app.add_handler(CommandHandler("true", true_lookup))
+    app.add_handler(CommandHandler("email", email_lookup))
+    app.add_handler(CommandHandler("ffinfo", ffinfo_lookup))
+    app.add_handler(CommandHandler("gst", gst_lookup))
     app.add_handler(CommandHandler("weather", weather_lookup))
     app.add_handler(CommandHandler("aqi", aqi_lookup))
     app.add_handler(CommandHandler("pincode", pincode_lookup))
