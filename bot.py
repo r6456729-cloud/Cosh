@@ -507,6 +507,19 @@ async def _yesukie_lookup(
     await delete_msg(context, chat_id, searching.message_id)
     payload = _yesukie_payload(raw)
     fields = _flatten_yesukie_data(payload)
+    # Some Yesukie endpoints return a meaningful response inside `data`
+    # using only status/error fields (for example, when an upstream provider
+    # is unavailable). The normal formatter intentionally hides those
+    # metadata keys, so preserve them as a fallback instead of incorrectly
+    # reporting "Data Not Found".
+    if not fields and isinstance(payload, dict):
+        fields = [
+            (str(key), str(value))
+            for key, value in payload.items()
+            if str(key).strip().lower() not in {"owner", "admin"}
+            and value not in (None, "", [], {})
+        ]
+
     if not fields:
         await send_expiring_lookup_message(
             update,
